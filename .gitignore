@@ -1,0 +1,18 @@
+.dart_tool/
+.packages
+build/
+.idea/
+*.iml
+.flutter-plugins
+.flutter-plugins-dependencies
+android/.gradle/
+android/local.properties
+*.jks
+key.properties
+# NOTE: *.g.dart is intentionally NOT ignored, so the repo runs without build_runner
+keystore.properties
+*.keystore
+.kotlin/
+.DS_Store
+__MACOSX/
+*.apk
