@@ -5,7 +5,6 @@ import 'dart:ui';
 import 'package:bloc_concurrency/bloc_concurrency.dart';
 import 'package:camera/camera.dart';
 import 'package:equatable/equatable.dart';
-import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../../../core/error/failures.dart';
@@ -21,9 +20,7 @@ part 'camera_state.dart';
 /// Everything that is business logic (queueing a batch) goes through a use case.
 class CameraBloc extends Bloc<CameraEvent, CameraState> {
   CameraBloc(this._enqueueBatch, this._watchQueue) : super(const CameraState()) {
-    // sequential() only orders events of ONE type. Started/paused/resumed/flipped
-    // are different types, so each handler also goes through _serialized() to
-    // make sure two CameraControllers are never opened at the same time.
+    // lifecycle changes must not interleave
     on<CameraStarted>(_onStarted, transformer: sequential());
     on<CameraPaused>(_onPaused, transformer: sequential());
     on<CameraResumed>(_onResumed, transformer: sequential());
@@ -49,21 +46,6 @@ class CameraBloc extends Bloc<CameraEvent, CameraState> {
   final WatchUploadQueue _watchQueue;
   late final StreamSubscription<List<UploadItem>> _queueSubscription;
 
-  /// Tail of the queue of camera open/close work, see [_serialized].
-  Future<void> _cameraWork = Future.value();
-
-  /// Runs [action] only after all earlier open/close work has finished.
-  ///
-  /// Without this, the permission dialog on first launch (inactive -> resumed)
-  /// started a second CameraController while the first was still initialising,
-  /// which CameraX rejects with "No supported surface combination ... too many
-  /// use cases".
-  Future<void> _serialized(Future<void> Function() action) {
-    final run = _cameraWork.then((_) => action());
-    _cameraWork = run.catchError((_) {});
-    return run;
-  }
-
   List<CameraDescription> _cameras = const [];
   CameraLensDirection _lens = CameraLensDirection.back;
 
@@ -73,10 +55,7 @@ class CameraBloc extends Bloc<CameraEvent, CameraState> {
     'CameraAccessRestricted',
   };
 
-  Future<void> _onStarted(CameraStarted event, Emitter<CameraState> emit) =>
-      _serialized(() => _start(emit));
-
-  Future<void> _start(Emitter<CameraState> emit) async {
+  Future<void> _onStarted(CameraStarted event, Emitter<CameraState> emit) async {
     try {
       _cameras = await availableCameras();
     } on CameraException catch (e) {
@@ -109,44 +88,34 @@ class CameraBloc extends Bloc<CameraEvent, CameraState> {
     ));
     await old?.dispose();
 
-    // One retry: right after another controller was released the camera can
-    // still be busy for a moment.
-    for (var attempt = 0; attempt < 2; attempt++) {
-      final controller = CameraController(
-        description,
-        ResolutionPreset.high,
-        enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.jpeg,
-      );
+    final controller = CameraController(
+      description,
+      ResolutionPreset.high,
+      enableAudio: false,
+      imageFormatGroup: ImageFormatGroup.jpeg,
+    );
 
+    try {
+      await controller.initialize();
+      final min = await controller.getMinZoomLevel();
+      final max = math.min(await controller.getMaxZoomLevel(), 8.0);
       try {
-        await controller.initialize();
-        final min = await controller.getMinZoomLevel();
-        final max = math.min(await controller.getMaxZoomLevel(), 8.0);
-        try {
-          await controller.setFlashMode(FlashMode.off);
-        } on CameraException {
-          // no flash unit (front camera)
-        }
-
-        emit(state.copyWith(
-          status: CameraStatus.ready,
-          controller: controller,
-          minZoom: min,
-          maxZoom: max,
-          zoom: 1.0.clamp(min, max).toDouble(),
-          flash: FlashMode.off,
-        ));
-        return;
-      } on CameraException catch (e) {
-        await controller.dispose();
-        final retry = attempt == 0 && !_deniedCodes.contains(e.code);
-        if (!retry) {
-          _emitError(e, emit);
-          return;
-        }
-        await Future<void>.delayed(const Duration(milliseconds: 400));
+        await controller.setFlashMode(FlashMode.off);
+      } on CameraException {
+        // no flash unit (front camera)
       }
+
+      emit(state.copyWith(
+        status: CameraStatus.ready,
+        controller: controller,
+        minZoom: min,
+        maxZoom: max,
+        zoom: 1.0.clamp(min, max).toDouble(),
+        flash: FlashMode.off,
+      ));
+    } on CameraException catch (e) {
+      await controller.dispose();
+      _emitError(e, emit);
     }
   }
 
@@ -154,41 +123,36 @@ class CameraBloc extends Bloc<CameraEvent, CameraState> {
     if (_deniedCodes.contains(e.code)) {
       emit(state.copyWith(status: CameraStatus.denied));
     } else {
-      // The raw description can be a screen-long native stack message.
-      debugPrint('Camera error ${e.code}: ${e.description}');
       emit(state.copyWith(
         status: CameraStatus.failed,
-        effect: const CameraMessage('Camera could not start. Please try again.'),
+        effect: CameraMessage(e.description ?? 'Camera error (${e.code})'),
       ));
     }
   }
 
   /// The camera is released while the app is in the background.
-  Future<void> _onPaused(CameraPaused event, Emitter<CameraState> emit) =>
-      _serialized(() async {
-        final controller = state.controller;
-        if (controller == null) return;
-        emit(state.copyWith(
-          status: CameraStatus.initializing,
-          clearController: true,
-        ));
-        await controller.dispose();
-      });
+  Future<void> _onPaused(CameraPaused event, Emitter<CameraState> emit) async {
+    final controller = state.controller;
+    if (controller == null) return;
+    emit(state.copyWith(
+      status: CameraStatus.initializing,
+      clearController: true,
+    ));
+    await controller.dispose();
+  }
 
-  Future<void> _onResumed(CameraResumed event, Emitter<CameraState> emit) =>
-      _serialized(() async {
-        if (state.controller == null && state.status != CameraStatus.denied) {
-          await _start(emit);
-        }
-      });
+  Future<void> _onResumed(CameraResumed event, Emitter<CameraState> emit) async {
+    if (state.controller == null && state.status != CameraStatus.denied) {
+      await _onStarted(const CameraStarted(), emit);
+    }
+  }
 
-  Future<void> _onFlipped(CameraFlipped event, Emitter<CameraState> emit) =>
-      _serialized(() async {
-        _lens = _lens == CameraLensDirection.back
-            ? CameraLensDirection.front
-            : CameraLensDirection.back;
-        await _open(_pick(_lens), emit);
-      });
+  Future<void> _onFlipped(CameraFlipped event, Emitter<CameraState> emit) async {
+    _lens = _lens == CameraLensDirection.back
+        ? CameraLensDirection.front
+        : CameraLensDirection.back;
+    await _open(_pick(_lens), emit);
+  }
 
   Future<void> _onZoomChanged(
     ZoomChanged event,
@@ -248,9 +212,8 @@ class CameraBloc extends Bloc<CameraEvent, CameraState> {
       final file = await controller.takePicture();
       emit(state.copyWith(batch: [...state.batch, file.path]));
     } on CameraException catch (e) {
-      debugPrint('Capture error ${e.code}: ${e.description}');
       emit(state.copyWith(
-        effect: const CameraMessage('Could not take the photo. Try again.'),
+        effect: CameraMessage(e.description ?? 'Could not take the photo'),
       ));
     }
   }
@@ -284,7 +247,6 @@ class CameraBloc extends Bloc<CameraEvent, CameraState> {
   @override
   Future<void> close() async {
     await _queueSubscription.cancel();
-    await _cameraWork;
     await state.controller?.dispose();
     return super.close();
   }

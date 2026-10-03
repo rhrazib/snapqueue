@@ -15,7 +15,7 @@ queue drains by itself once the network is back.
 > refuses when offline and randomly drops ~30% of uploads to exercise the retry
 > logic. A commented-out `HttpUploadGateway` shows the real implementation.
 
-**Release APK:** [Download SnapQueue v1.0.0](https://github.com/rhrazib/SnapQueue/releases/tag/v1.0.0)
+**Release APK:** [Download SnapQueue v1.0.0](https://github.com/rhrazib/snapqueue/releases/latest)
 
 (Install it on a real Android 7.0+ phone; the camera needs hardware.)
 
@@ -107,35 +107,40 @@ goes through a use case.
 
 ## Generative AI Usage
 
-I used **Claude (Anthropic)** as a pair-programming and review partner:
+I used **Claude (Anthropic)** and **ChatGPT (OpenAI)** as pair-programming, debugging, and code-review assistants during development. AI tools were used to accelerate implementation, review edge cases, and audit the project against the assessment requirements. I remained responsible for the architecture, implementation decisions, testing, and final verification.
 
-- **Architecture and boilerplate**: feature-first Clean Architecture, BLoC
-  structure, Drift table, WorkManager wiring.
-- **Audit against the assessment**: I gave Claude the exact task requirements
-  and asked it to trace the real flow (capture -> queue -> offline -> retry ->
-  synced -> cleanup) and list only actual gaps. Its findings drove the fixes
-  below.
+* **Architecture and implementation assistance:** Used AI tools to help with feature-first Clean Architecture, BLoC structure, Drift database setup, WorkManager integration, and related Flutter implementation details.
+* **Assessment audit:** Provided the exact assessment requirements and asked the AI tools to trace the real end-to-end flow — capture → local queue → offline handling → retry → sync → cleanup — and identify concrete gaps.
+* **Debugging and review:** Used AI to investigate implementation issues, review specific classes/functions, and suggest minimal, targeted fixes rather than rewriting unrelated parts of the project.
 
-Essential prompts:
+### Essential Prompts
 
-1. *"Audit the project against the exact assessment requirements ... Do NOT
-   rewrite the whole project ... For every issue, mention the exact
-   file/class/function ... Trace the actual flow: Capture image -> save locally
-   -> create batch -> queue upload -> no internet/API failure -> persist pending
-   state -> connectivity restored -> WorkManager -> retry -> success -> mark
-   synced -> cleanup."*
-2. *"Check whether the implementation really satisfies: if the API call fails
-   due to low bandwidth or no internet, the images must remain in the local
-   queue, and it retries automatically without user intervention."*
-3. *"Complete all of the audit's must-fix and should-fix items with minimal
-   changes."*
+1. *"Audit the project against the exact assessment requirements. Do NOT rewrite the whole project. For every issue, mention the exact file, class, or function. Trace the actual flow: Capture image → save locally → create batch → queue upload → no internet/API failure → persist pending state → connectivity restored → WorkManager → retry → success → mark synced → cleanup."*
 
-What I decided and verified myself: the layering and trade-offs, the retry
-policy (offline/low bandwidth never terminal), running the app on a physical
-Android device, and the airplane-mode / kill-the-app tests described below.
-Fixes that came out of the audit: queue re-check when a batch arrives mid-sync,
-automatic retry of low-bandwidth failures, delete-after-sync cleanup, atomic
-batch enqueue with rollback, and the submit race in `CameraBloc`.
+2. *"Check whether the implementation really satisfies this requirement: if the API call fails due to low bandwidth or no internet, the images must remain in the local queue and retry automatically without user intervention."*
+
+3. *"Complete the audit's must-fix and should-fix items with minimal changes. Do not rewrite unrelated parts of the project."*
+
+### My Own Decisions and Verification
+
+I personally made and verified the key technical decisions, including the architectural layering and trade-offs, the retry policy, and the behavior of the application on a physical Android device.
+
+I also manually tested the critical sync scenarios, including:
+
+* Airplane mode / no-internet upload
+* Automatic retry after connectivity is restored
+* Killing the app during an upload
+* Queue recovery and subsequent synchronization
+
+The AI-assisted audit helped identify and address several concrete issues, including:
+
+* Re-checking the queue when a new batch arrives during an active sync
+* Automatically retrying low-bandwidth failures
+* Deleting local files after successful synchronization
+* Atomic batch enqueue with rollback
+* Preventing the submit race condition in `CameraBloc`
+
+
 
 ## How to Run
 
